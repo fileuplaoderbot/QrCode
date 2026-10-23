@@ -102,6 +102,7 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.zxing.core)
   implementation(libs.androidx.biometric)
+  implementation(libs.androidx.fragment.ktx)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
 

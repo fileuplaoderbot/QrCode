@@ -9,7 +9,6 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
-import java.nio.ByteBuffer
 import java.util.EnumMap
 
 class QrBarcodeAnalyzer(
@@ -48,14 +47,30 @@ class QrBarcodeAnalyzer(
 
     override fun analyze(image: ImageProxy) {
         try {
-            val buffer: ByteBuffer = image.planes[0].buffer
-            val data = ByteArray(buffer.remaining())
-            buffer.get(data)
-
+            val yPlane = image.planes.getOrNull(0) ?: return
+            val buffer = yPlane.buffer
+            val rowStride = yPlane.rowStride
             val width = image.width
             val height = image.height
 
-            // ZXing PlanarYUVLuminanceSource expects YUV luminance data
+            // Handle row stride correctly to avoid buffer overflow or crop mismatch
+            val data: ByteArray
+            if (rowStride == width) {
+                data = ByteArray(buffer.remaining())
+                buffer.get(data)
+            } else {
+                data = ByteArray(width * height)
+                val row = ByteArray(rowStride)
+                var destPos = 0
+                for (i in 0 until height) {
+                    val toRead = minOf(rowStride, buffer.remaining())
+                    if (toRead <= 0) break
+                    buffer.get(row, 0, toRead)
+                    System.arraycopy(row, 0, data, destPos, width)
+                    destPos += width
+                }
+            }
+
             val source = PlanarYUVLuminanceSource(
                 data,
                 width,
@@ -72,10 +87,10 @@ class QrBarcodeAnalyzer(
             try {
                 val result = reader.decodeWithState(bitmap)
                 val text = result.text
-                val format = result.barcodeFormat.name
+                val format = result.barcodeFormat?.name ?: "QR_CODE"
                 val now = System.currentTimeMillis()
 
-                if (text != null && text.isNotBlank()) {
+                if (!text.isNullOrBlank()) {
                     if (text != lastScannedText || (now - lastScannedTimestamp) > throttleIntervalMs) {
                         lastScannedText = text
                         lastScannedTimestamp = now
@@ -83,16 +98,18 @@ class QrBarcodeAnalyzer(
                     }
                 }
             } catch (e: NotFoundException) {
-                // No barcode/QR found in this frame
-            } catch (e: Exception) {
-                // Ignore decoding errors on blurry frames
+                // No QR/barcode in this frame
+            } catch (t: Throwable) {
+                // Ignore transient frame parsing errors
             } finally {
                 reader.reset()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (t: Throwable) {
+            t.printStackTrace()
         } finally {
-            image.close()
+            try {
+                image.close()
+            } catch (ignored: Throwable) {}
         }
     }
 

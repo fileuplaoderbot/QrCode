@@ -1,10 +1,14 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -42,15 +46,17 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,7 +70,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -76,8 +81,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.scanner.QrBarcodeAnalyzer
+import com.example.utils.GalleryPickerHelper
 import com.example.viewmodel.MainViewModel
 import java.util.concurrent.Executors
 
@@ -87,6 +95,8 @@ fun ScannerScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -96,46 +106,84 @@ fun ScannerScreen(
         )
     }
 
+    // Automatically re-check camera permission on ON_RESUME (e.g. after returning from Settings)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasCameraPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         hasCameraPermission = isGranted
+        if (!isGranted) {
+            Toast.makeText(context, "Camera permission not granted. You can enable it in App Settings.", Toast.LENGTH_LONG).show()
+        }
     }
 
     LaunchedEffect(Unit) {
         if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
+            try {
+                permissionLauncher.launch(Manifest.permission.CAMERA)
+            } catch (t: Throwable) {
+                t.printStackTrace()
+            }
         }
     }
 
+    // Standard ActivityResult launcher using GalleryPickerHelper (ACTION_PICK + ACTION_GET_CONTENT)
     val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri = result.data?.data
         if (uri != null) {
             viewModel.scanImageUri(uri)
+        }
+    }
+
+    val onPickGallerySafe: () -> Unit = {
+        GalleryPickerHelper.launchImagePicker(context, galleryLauncher)
+    }
+
+    val onOpenSettings: () -> Unit = {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(context, "Please open Android Settings > Apps > OfflineQR > Permissions > Camera", Toast.LENGTH_LONG).show()
         }
     }
 
     if (!hasCameraPermission) {
         CameraPermissionDeniedContent(
             onRequestPermission = {
-                permissionLauncher.launch(Manifest.permission.CAMERA)
+                try {
+                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                } catch (t: Throwable) {
+                    onOpenSettings()
+                }
             },
-            onPickGallery = {
-                galleryLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            },
+            onOpenSettings = onOpenSettings,
+            onPickGallery = onPickGallerySafe,
             modifier = modifier
         )
     } else {
         CameraScannerContent(
             viewModel = viewModel,
-            onPickGallery = {
-                galleryLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            },
+            onPickGallery = onPickGallerySafe,
             modifier = modifier
         )
     }
@@ -154,19 +202,81 @@ fun CameraScannerContent(
     val isFrontCamera by viewModel.isFrontCamera.collectAsStateWithLifecycle()
 
     var cameraInstance by remember { mutableStateOf<Camera?>(null) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
-            cameraExecutor.shutdown()
+            try {
+                cameraExecutor.shutdown()
+            } catch (ignored: Throwable) {}
         }
     }
 
-    // Toggle torch on camera
+    // Bind camera in LaunchedEffect, NOT on every Compose recomposition
+    LaunchedEffect(isFrontCamera, previewViewRef, lifecycleOwner) {
+        val pView = previewViewRef ?: return@LaunchedEffect
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        cameraProviderFuture.addListener({
+            try {
+                val cameraProvider = cameraProviderFuture.get()
+                cameraProvider.unbindAll()
+
+                val preview = Preview.Builder().build().also {
+                    it.surfaceProvider = pView.surfaceProvider
+                }
+
+                val imageAnalyzer = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                    .also {
+                        it.setAnalyzer(
+                            cameraExecutor,
+                            QrBarcodeAnalyzer { text, format ->
+                                viewModel.onCodeScanned(text, format)
+                            }
+                        )
+                    }
+
+                val hasFront = cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
+                val hasBack = cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)
+
+                val selector = if (isFrontCamera && hasFront) {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                } else if (hasBack) {
+                    CameraSelector.DEFAULT_BACK_CAMERA
+                } else if (hasFront) {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                } else {
+                    cameraError = "No camera found on this device or emulator."
+                    return@addListener
+                }
+
+                cameraInstance = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    selector,
+                    preview,
+                    imageAnalyzer
+                )
+                cameraError = null
+            } catch (t: Throwable) {
+                t.printStackTrace()
+                cameraError = "Camera could not be accessed. Please check permissions."
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    // Toggle torch safely
     LaunchedEffect(torchEnabled, cameraInstance) {
         cameraInstance?.let { cam ->
-            if (cam.cameraInfo.hasFlashUnit()) {
-                cam.cameraControl.enableTorch(torchEnabled)
+            try {
+                if (cam.cameraInfo.hasFlashUnit()) {
+                    cam.cameraControl.enableTorch(torchEnabled)
+                }
+            } catch (t: Throwable) {
+                t.printStackTrace()
             }
         }
     }
@@ -177,102 +287,80 @@ fun CameraScannerContent(
             .background(Color.Black)
             .testTag("camera_preview")
     ) {
-        AndroidView(
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
+        if (cameraError != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.size(72.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.VideocamOff,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
                 }
 
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
+                Spacer(modifier = Modifier.height(20.dp))
 
-                    val imageAnalyzer = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also {
-                            it.setAnalyzer(
-                                cameraExecutor,
-                                QrBarcodeAnalyzer { text, format ->
-                                    viewModel.onCodeScanned(text, format)
-                                }
-                            )
-                        }
+                Text(
+                    text = "Camera Unavailable",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
 
-                    val cameraSelector = if (isFrontCamera) {
-                        CameraSelector.DEFAULT_FRONT_CAMERA
-                    } else {
-                        CameraSelector.DEFAULT_BACK_CAMERA
-                    }
+                Spacer(modifier = Modifier.height(8.dp))
 
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraInstance = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            cameraSelector,
-                            preview,
-                            imageAnalyzer
+                Text(
+                    text = cameraError ?: "Camera could not be started.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Button(
+                    onClick = onPickGallery,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Image, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Scan from Photo Gallery")
+                }
+            }
+        } else {
+            // Camera Preview View
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }, ContextCompat.getMainExecutor(ctx))
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                    }.also { previewViewRef = it }
+                },
+                update = { /* Do not rebind camera on recomposition */ },
+                modifier = Modifier.fillMaxSize()
+            )
 
-                previewView
-            },
-            update = { previewView ->
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
+            // Safe overlay with framing and animated laser line
+            ScannerOverlay()
+        }
 
-                    val imageAnalyzer = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also {
-                            it.setAnalyzer(
-                                cameraExecutor,
-                                QrBarcodeAnalyzer { text, format ->
-                                    viewModel.onCodeScanned(text, format)
-                                }
-                            )
-                        }
-
-                    val cameraSelector = if (isFrontCamera) {
-                        CameraSelector.DEFAULT_FRONT_CAMERA
-                    } else {
-                        CameraSelector.DEFAULT_BACK_CAMERA
-                    }
-
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraInstance = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            cameraSelector,
-                            preview,
-                            imageAnalyzer
-                        )
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }, ContextCompat.getMainExecutor(context))
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // Overlay with cutout and animated laser line
-        ScannerOverlay()
-
-        // Top Controls (Torch & Camera Switch)
+        // Top Controls (Status badge, Torch & Camera Switch)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -307,7 +395,6 @@ fun CameraScannerContent(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                // Flashlight toggle button
                 FilledTonalIconButton(
                     onClick = { viewModel.toggleTorch() },
                     colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -322,7 +409,6 @@ fun CameraScannerContent(
                     )
                 }
 
-                // Switch camera lens button
                 FilledTonalIconButton(
                     onClick = { viewModel.toggleCameraLens() },
                     colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -414,20 +500,15 @@ fun ScannerOverlay() {
             val frameSizePx = boxSize.toPx()
             val left = (canvasWidth - frameSizePx) / 2f
             val top = (canvasHeight - frameSizePx) / 2.3f
+            val right = left + frameSizePx
+            val bottom = top + frameSizePx
 
-            // Semi-transparent background scrim
-            drawRect(
-                color = Color.Black.copy(alpha = 0.55f),
-                size = Size(canvasWidth, canvasHeight)
-            )
-
-            // Clear cutout
-            drawRect(
-                color = Color.Transparent,
-                topLeft = Offset(left, top),
-                size = Size(frameSizePx, frameSizePx),
-                blendMode = BlendMode.Clear
-            )
+            // Crash-safe 4-quadrant scrim around the frame
+            val scrimColor = Color.Black.copy(alpha = 0.55f)
+            drawRect(scrimColor, Offset(0f, 0f), Size(canvasWidth, top))
+            drawRect(scrimColor, Offset(0f, bottom), Size(canvasWidth, canvasHeight - bottom))
+            drawRect(scrimColor, Offset(0f, top), Size(left, frameSizePx))
+            drawRect(scrimColor, Offset(right, top), Size(canvasWidth - right, frameSizePx))
 
             // Corner brackets
             val bracketLength = 36.dp.toPx()
@@ -439,16 +520,16 @@ fun ScannerOverlay() {
             drawLine(cornerColor, Offset(left, top), Offset(left, top + bracketLength), strokeWidth)
 
             // Top Right
-            drawLine(cornerColor, Offset(left + frameSizePx, top), Offset(left + frameSizePx - bracketLength, top), strokeWidth)
-            drawLine(cornerColor, Offset(left + frameSizePx, top), Offset(left + frameSizePx, top + bracketLength), strokeWidth)
+            drawLine(cornerColor, Offset(right, top), Offset(right - bracketLength, top), strokeWidth)
+            drawLine(cornerColor, Offset(right, top), Offset(right, top + bracketLength), strokeWidth)
 
             // Bottom Left
-            drawLine(cornerColor, Offset(left, top + frameSizePx), Offset(left + bracketLength, top + frameSizePx), strokeWidth)
-            drawLine(cornerColor, Offset(left, top + frameSizePx), Offset(left, top + frameSizePx - bracketLength), strokeWidth)
+            drawLine(cornerColor, Offset(left, bottom), Offset(left + bracketLength, bottom), strokeWidth)
+            drawLine(cornerColor, Offset(left, bottom), Offset(left, bottom - bracketLength), strokeWidth)
 
             // Bottom Right
-            drawLine(cornerColor, Offset(left + frameSizePx, top + frameSizePx), Offset(left + frameSizePx - bracketLength, top + frameSizePx), strokeWidth)
-            drawLine(cornerColor, Offset(left + frameSizePx, top + frameSizePx), Offset(left + frameSizePx, top + frameSizePx - bracketLength), strokeWidth)
+            drawLine(cornerColor, Offset(right, bottom), Offset(right - bracketLength, bottom), strokeWidth)
+            drawLine(cornerColor, Offset(right, bottom), Offset(right, bottom - bracketLength), strokeWidth)
 
             // Animated Laser line
             val laserY = top + (frameSizePx * laserPosition)
@@ -462,7 +543,7 @@ fun ScannerOverlay() {
                         Color.Transparent
                     ),
                     startX = left,
-                    endX = left + frameSizePx
+                    endX = right
                 ),
                 topLeft = Offset(left, laserY - 1.5.dp.toPx()),
                 size = Size(frameSizePx, 3.dp.toPx())
@@ -474,6 +555,7 @@ fun ScannerOverlay() {
 @Composable
 fun CameraPermissionDeniedContent(
     onRequestPermission: () -> Unit,
+    onOpenSettings: () -> Unit,
     onPickGallery: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -481,6 +563,7 @@ fun CameraPermissionDeniedContent(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .statusBarsPadding()
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -492,22 +575,22 @@ fun CameraPermissionDeniedContent(
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.size(80.dp)
+                modifier = Modifier.size(76.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.Default.VideocamOff,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(40.dp)
+                        modifier = Modifier.size(38.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
             Text(
-                text = "Camera Access Required",
+                text = "Camera Permission Required",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground
@@ -516,41 +599,57 @@ fun CameraPermissionDeniedContent(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "OfflineQR needs camera permission to scan QR codes and barcodes. All scans are processed purely on your device without internet access.",
+                text = "To scan codes using the camera, OfflineQR needs camera access. If Android previously blocked the prompt, tap 'Open App Settings' to enable Camera.",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
+            // Primary action: Request Permission
             Button(
                 onClick = onRequestPermission,
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
-                    .fillMaxWidth(0.8f)
+                    .fillMaxWidth(0.85f)
                     .height(48.dp)
                     .testTag("grant_camera_permission_button")
             ) {
                 Icon(imageVector = Icons.Default.Videocam, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Enable Camera")
+                Text("Allow Camera Permission")
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Button(
-                onClick = onPickGallery,
-                colors = ButtonDefaults.filledTonalButtonColors(),
-                shape = RoundedCornerShape(12.dp),
+            // Open App Settings directly
+            OutlinedButton(
+                onClick = onOpenSettings,
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
-                    .fillMaxWidth(0.8f)
+                    .fillMaxWidth(0.85f)
+                    .height(48.dp)
+            ) {
+                Icon(imageVector = Icons.Default.Settings, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Open App Settings")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Pick from Gallery
+            FilledTonalButton(
+                onClick = onPickGallery,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
                     .height(48.dp)
             ) {
                 Icon(imageVector = Icons.Default.Image, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Scan from Gallery Instead")
+                Text("Scan from Photo Gallery")
             }
         }
     }

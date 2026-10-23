@@ -74,9 +74,12 @@ fun HomeScreen(
     val favorites by viewModel.favoriteScans.collectAsStateWithLifecycle()
     val pinLockEnabled by viewModel.pinLockEnabled.collectAsStateWithLifecycle()
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+
     val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri = result.data?.data
         if (uri != null) {
             viewModel.scanImageUri(uri)
         }
@@ -258,9 +261,7 @@ fun HomeScreen(
                     modifier = Modifier
                         .weight(1f)
                         .clickable {
-                            galleryLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
+                            com.example.utils.GalleryPickerHelper.launchImagePicker(context, galleryLauncher)
                         }
                         .testTag("action_gallery_card")
                 ) {

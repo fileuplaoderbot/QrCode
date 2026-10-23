@@ -101,6 +101,24 @@ class MainActivity : FragmentActivity() {
         super.onPause()
         viewModel.lockApp()
     }
+
+    override fun startActivityForResult(intent: android.content.Intent, requestCode: Int) {
+        val safeCode = if (requestCode != -1) (requestCode and 0xFFFF) else -1
+        try {
+            super.startActivityForResult(intent, safeCode)
+        } catch (e: Exception) {
+            super.startActivityForResult(intent, -1)
+        }
+    }
+
+    override fun startActivityForResult(intent: android.content.Intent, requestCode: Int, options: android.os.Bundle?) {
+        val safeCode = if (requestCode != -1) (requestCode and 0xFFFF) else -1
+        try {
+            super.startActivityForResult(intent, safeCode, options)
+        } catch (e: Exception) {
+            super.startActivityForResult(intent, -1, options)
+        }
+    }
 }
 
 @Composable
