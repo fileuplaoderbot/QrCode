@@ -1,0 +1,330 @@
+package com.example.viewmodel
+
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.backup.BackupManager
+import com.example.data.local.AppDatabase
+import com.example.data.local.ScanEntity
+import com.example.data.preferences.AppPreferences
+import com.example.data.repository.ScanRepository
+import com.example.decoder.ImageDecoder
+import com.example.model.ParsedPayload
+import com.example.security.SecurityManager
+import com.example.utils.VibrationHelper
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+enum class Screen {
+    HOME,
+    SCANNER,
+    GENERATOR,
+    HISTORY,
+    FAVORITES,
+    SETTINGS
+}
+
+data class LockState(
+    val isLocked: Boolean = false,
+    val hasPinConfigured: Boolean = false,
+    val biometricsAllowed: Boolean = false,
+    val errorMessage: String? = null
+)
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val repository: ScanRepository
+    val prefs: AppPreferences = AppPreferences(application)
+
+    init {
+        val database = AppDatabase.getDatabase(application)
+        repository = ScanRepository(database.scanDao())
+    }
+
+    val allScans: StateFlow<List<ScanEntity>> = repository.allScans
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val favoriteScans: StateFlow<List<ScanEntity>> = repository.favoriteScans
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val themeMode: StateFlow<String> = prefs.themeMode
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "system")
+
+    val vibrateOnScan: StateFlow<Boolean> = prefs.vibrateOnScan
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val preventDuplicates: StateFlow<Boolean> = prefs.preventDuplicates
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val saveSensitiveHistory: StateFlow<Boolean> = prefs.saveSensitiveHistory
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val pinLockEnabled: StateFlow<Boolean> = prefs.pinLockEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val biometricEnabled: StateFlow<Boolean> = prefs.biometricEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    // Navigation
+    private val _currentScreen = MutableStateFlow(Screen.HOME)
+    val currentScreen: StateFlow<Screen> = _currentScreen.asStateFlow()
+
+    // Scanner state
+    private val _torchEnabled = MutableStateFlow(false)
+    val torchEnabled: StateFlow<Boolean> = _torchEnabled.asStateFlow()
+
+    private val _isFrontCamera = MutableStateFlow(false)
+    val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
+
+    // Active Result Preview
+    private val _activePayload = MutableStateFlow<ParsedPayload?>(null)
+    val activePayload: StateFlow<ParsedPayload?> = _activePayload.asStateFlow()
+
+    private val _activeScanEntityId = MutableStateFlow<Long?>(null)
+    val activeScanEntityId: StateFlow<Long?> = _activeScanEntityId.asStateFlow()
+
+    // Lock Screen
+    private val _lockState = MutableStateFlow(LockState())
+    val lockState: StateFlow<LockState> = _lockState.asStateFlow()
+
+    // UI Message/Snackbar
+    private val _snackbarMessage = MutableStateFlow<String?>(null)
+    val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+
+    init {
+        // Initialize lock state
+        viewModelScope.launch {
+            val enabled = prefs.pinLockEnabled.first()
+            val bio = prefs.biometricEnabled.first()
+            if (enabled) {
+                _lockState.value = LockState(
+                    isLocked = true,
+                    hasPinConfigured = true,
+                    biometricsAllowed = bio
+                )
+            }
+        }
+    }
+
+    fun navigateTo(screen: Screen) {
+        _currentScreen.value = screen
+    }
+
+    fun toggleTorch() {
+        _torchEnabled.value = !_torchEnabled.value
+    }
+
+    fun toggleCameraLens() {
+        _isFrontCamera.value = !_isFrontCamera.value
+    }
+
+    fun showPayloadPreview(payload: ParsedPayload, existingEntityId: Long? = null) {
+        _activePayload.value = payload
+        _activeScanEntityId.value = existingEntityId
+    }
+
+    fun dismissPayloadPreview() {
+        _activePayload.value = null
+        _activeScanEntityId.value = null
+    }
+
+    fun showMessage(msg: String) {
+        _snackbarMessage.value = msg
+    }
+
+    fun clearMessage() {
+        _snackbarMessage.value = null
+    }
+
+    /**
+     * Called when a QR or barcode is scanned via camera stream
+     */
+    fun onCodeScanned(text: String, format: String) {
+        viewModelScope.launch {
+            val payload = ParsedPayload.parse(text, format)
+
+            // Vibrate if setting is on
+            if (vibrateOnScan.value) {
+                VibrationHelper.vibrateShort(getApplication())
+            }
+
+            // Check duplicate prevention
+            val isDup = preventDuplicates.value
+            val existing = if (isDup) repository.findByContent(text) else null
+
+            var entityId: Long? = existing?.id
+
+            // Check if sensitive and user disabled saving sensitive
+            val shouldSave = !payload.isSensitive || saveSensitiveHistory.value
+
+            if (existing == null && shouldSave) {
+                val entity = ScanEntity(
+                    content = text,
+                    rawFormat = format,
+                    contentType = payload.type.name,
+                    title = payload.title,
+                    timestamp = System.currentTimeMillis(),
+                    isFavorite = false,
+                    isSensitive = payload.isSensitive
+                )
+                entityId = repository.insertScan(entity)
+            } else if (existing != null) {
+                showMessage("Duplicate scan detected")
+            }
+
+            showPayloadPreview(payload, entityId)
+        }
+    }
+
+    /**
+     * Decode image picked from Gallery
+     */
+    fun scanImageUri(uri: Uri) {
+        viewModelScope.launch {
+            val decoded = ImageDecoder.decodeFromUri(getApplication(), uri)
+            if (decoded != null) {
+                onCodeScanned(decoded.first, decoded.second)
+            } else {
+                showMessage("No readable QR code or barcode found in this image.")
+            }
+        }
+    }
+
+    fun toggleFavorite(scan: ScanEntity) {
+        viewModelScope.launch {
+            repository.toggleFavorite(scan)
+        }
+    }
+
+    fun deleteScan(scan: ScanEntity) {
+        viewModelScope.launch {
+            repository.deleteScan(scan)
+            if (_activeScanEntityId.value == scan.id) {
+                _activeScanEntityId.value = null
+            }
+        }
+    }
+
+    fun clearAllHistory() {
+        viewModelScope.launch {
+            repository.clearAll()
+            showMessage("History cleared")
+        }
+    }
+
+    // Settings actions
+    fun setThemeMode(mode: String) {
+        viewModelScope.launch { prefs.setThemeMode(mode) }
+    }
+
+    fun setVibrateOnScan(enabled: Boolean) {
+        viewModelScope.launch { prefs.setVibrateOnScan(enabled) }
+    }
+
+    fun setPreventDuplicates(enabled: Boolean) {
+        viewModelScope.launch { prefs.setPreventDuplicates(enabled) }
+    }
+
+    fun setSaveSensitiveHistory(enabled: Boolean) {
+        viewModelScope.launch { prefs.setSaveSensitiveHistory(enabled) }
+    }
+
+    fun setBiometricEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setBiometricEnabled(enabled)
+            _lockState.value = _lockState.value.copy(biometricsAllowed = enabled)
+        }
+    }
+
+    fun setPin(pin: String, enableBiometrics: Boolean = false) {
+        viewModelScope.launch {
+            val salt = SecurityManager.generateSalt()
+            val hash = SecurityManager.hashPin(pin, salt)
+            prefs.setPinSecurity(enabled = true, salt = salt, hash = hash)
+            prefs.setBiometricEnabled(enableBiometrics)
+            _lockState.value = _lockState.value.copy(
+                hasPinConfigured = true,
+                biometricsAllowed = enableBiometrics,
+                isLocked = false
+            )
+            showMessage("PIN security lock enabled")
+        }
+    }
+
+    fun disablePin(enteredPin: String): Boolean {
+        var success = false
+        viewModelScope.launch {
+            val salt = prefs.pinSalt.first()
+            val hash = prefs.pinHash.first()
+            if (salt != null && hash != null && SecurityManager.verifyPin(enteredPin, salt, hash)) {
+                prefs.setPinSecurity(enabled = false)
+                _lockState.value = LockState(isLocked = false, hasPinConfigured = false)
+                showMessage("PIN security lock disabled")
+                success = true
+            } else {
+                _lockState.value = _lockState.value.copy(errorMessage = "Incorrect PIN")
+            }
+        }
+        return success
+    }
+
+    fun unlockWithPin(enteredPin: String): Boolean {
+        var correct = false
+        viewModelScope.launch {
+            val salt = prefs.pinSalt.first()
+            val hash = prefs.pinHash.first()
+            if (salt != null && hash != null && SecurityManager.verifyPin(enteredPin, salt, hash)) {
+                _lockState.value = _lockState.value.copy(isLocked = false, errorMessage = null)
+                correct = true
+            } else {
+                _lockState.value = _lockState.value.copy(errorMessage = "Incorrect PIN. Try again.")
+            }
+        }
+        return correct
+    }
+
+    fun unlockWithBiometrics() {
+        _lockState.value = _lockState.value.copy(isLocked = false, errorMessage = null)
+    }
+
+    fun lockApp() {
+        if (pinLockEnabled.value) {
+            _lockState.value = _lockState.value.copy(isLocked = true, errorMessage = null)
+        }
+    }
+
+    // Backup actions
+    fun exportBackup(uri: Uri, includeSensitive: Boolean) {
+        viewModelScope.launch {
+            val allList = repository.getAllList()
+            val success = BackupManager.exportToJson(getApplication(), uri, allList, includeSensitive)
+            if (success) {
+                showMessage("Backup exported successfully (${allList.size} items)")
+            } else {
+                showMessage("Export failed")
+            }
+        }
+    }
+
+    fun importBackup(uri: Uri, replaceExisting: Boolean) {
+        viewModelScope.launch {
+            val result = BackupManager.importFromJson(getApplication(), uri)
+            result.onSuccess { importedItems ->
+                if (replaceExisting) {
+                    repository.clearAll()
+                }
+                repository.insertAll(importedItems)
+                showMessage("Imported ${importedItems.size} items successfully")
+            }.onFailure { err ->
+                showMessage("Import failed: ${err.message}")
+            }
+        }
+    }
+}
