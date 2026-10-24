@@ -10,7 +10,6 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
-import com.google.zxing.NotFoundException
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
@@ -23,10 +22,17 @@ object ImageDecoder {
 
     suspend fun decodeFromUri(context: Context, uri: Uri): Pair<String, String>? = withContext(Dispatchers.IO) {
         try {
-            // Read bytes once to handle single-read content providers safely
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return@withContext null
+            decodeFromByteArray(bytes)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+            null
+        }
+    }
 
+    suspend fun decodeFromByteArray(bytes: ByteArray): Pair<String, String>? = withContext(Dispatchers.IO) {
+        try {
             if (bytes.isEmpty()) return@withContext null
 
             // Inspect EXIF orientation
@@ -50,62 +56,69 @@ object ImageDecoder {
             val origHeight = boundsOptions.outHeight
             if (origWidth <= 0 || origHeight <= 0) return@withContext null
 
-            // We test standard scale, and if needed, half scale
             val candidateBitmaps = mutableListOf<Bitmap>()
 
-            // 1. Scaled to max 1200px
-            var sampleSize = 1
-            val maxDim = 1400
-            while (origWidth / sampleSize > maxDim || origHeight / sampleSize > maxDim) {
-                sampleSize *= 2
-            }
-
-            val decodeOptions = BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            }
-
-            var decodedBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
-
-            if (decodedBitmap != null) {
-                if (rotationDegrees != 0f) {
-                    val matrix = Matrix().apply { postRotate(rotationDegrees) }
-                    val rotated = Bitmap.createBitmap(decodedBitmap, 0, 0, decodedBitmap.width, decodedBitmap.height, matrix, true)
-                    if (rotated != decodedBitmap) {
-                        decodedBitmap.recycle()
-                        decodedBitmap = rotated
-                    }
-                }
-                candidateBitmaps.add(decodedBitmap)
-            }
-
-            // Also try full resolution if sampleSize > 1 and image isn't gigantically huge
-            if (sampleSize > 1 && origWidth <= 2400 && origHeight <= 2400) {
+            // 1. Try full resolution if within reasonable size (up to 4096 x 4096, covers all standard phone screenshots)
+            if (origWidth <= 4096 && origHeight <= 4096) {
                 val fullOptions = BitmapFactory.Options().apply {
                     inSampleSize = 1
                     inPreferredConfig = Bitmap.Config.ARGB_8888
                 }
-                var fullBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, fullOptions)
+                val fullBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, fullOptions)
                 if (fullBmp != null) {
-                    if (rotationDegrees != 0f) {
-                        val matrix = Matrix().apply { postRotate(rotationDegrees) }
-                        val rotated = Bitmap.createBitmap(fullBmp, 0, 0, fullBmp.width, fullBmp.height, matrix, true)
-                        if (rotated != fullBmp) {
-                            fullBmp.recycle()
-                            fullBmp = rotated
-                        }
-                    }
-                    candidateBitmaps.add(fullBmp)
+                    val rotated = applyRotation(fullBmp, rotationDegrees)
+                    candidateBitmaps.add(rotated)
                 }
             }
 
-            // Iterate candidate bitmaps and attempt multi-stage decode
+            // 2. Scaled version (sampleSize 2) for very large images or fast fallback
+            var sampleSize = 1
+            val maxDim = 1200
+            while (origWidth / sampleSize > maxDim || origHeight / sampleSize > maxDim) {
+                sampleSize *= 2
+            }
+            if (sampleSize > 1) {
+                val scaledOptions = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                val scaledBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, scaledOptions)
+                if (scaledBmp != null) {
+                    val rotated = applyRotation(scaledBmp, rotationDegrees)
+                    candidateBitmaps.add(rotated)
+                }
+            }
+
+            // 3. For each candidate bitmap, try multi-stage decoding
             for (bmp in candidateBitmaps) {
                 val result = decodeWithMultipleStrategies(bmp)
                 if (result != null) {
-                    // Clean up bitmaps
                     candidateBitmaps.forEach { it.recycle() }
                     return@withContext result
+                }
+            }
+
+            // 4. Crop passes for screenshots (where QR codes are placed in the upper-middle card, e.g. Wi-Fi shares)
+            for (bmp in candidateBitmaps) {
+                val w = bmp.width
+                val h = bmp.height
+                if (h > w * 1.3f) {
+                    // Upper-center crop (y: 15% to 65%, x: 10% to 90%)
+                    val top = (h * 0.15f).toInt()
+                    val cropH = (h * 0.50f).toInt().coerceAtMost(h - top)
+                    val left = (w * 0.08f).toInt()
+                    val cropW = (w * 0.84f).toInt().coerceAtMost(w - left)
+                    if (cropW > 100 && cropH > 100) {
+                        try {
+                            val upperCrop = Bitmap.createBitmap(bmp, left, top, cropW, cropH)
+                            val res = decodeSingleOrientation(upperCrop)
+                            upperCrop.recycle()
+                            if (res != null) {
+                                candidateBitmaps.forEach { it.recycle() }
+                                return@withContext res
+                            }
+                        } catch (ignored: Throwable) {}
+                    }
                 }
             }
 
@@ -115,6 +128,16 @@ object ImageDecoder {
             t.printStackTrace()
             null
         }
+    }
+
+    private fun applyRotation(bitmap: Bitmap, degrees: Float): Bitmap {
+        if (degrees == 0f) return bitmap
+        val matrix = Matrix().apply { postRotate(degrees) }
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (rotated != bitmap) {
+            bitmap.recycle()
+        }
+        return rotated
     }
 
     private fun decodeWithMultipleStrategies(bitmap: Bitmap): Pair<String, String>? {

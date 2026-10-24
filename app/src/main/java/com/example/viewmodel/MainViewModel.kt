@@ -2,6 +2,7 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.backup.BackupManager
@@ -222,17 +223,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Decode image picked from Gallery with comprehensive multi-pass decoding
      */
+    fun scanImageBytes(bytes: ByteArray) {
+        viewModelScope.launch {
+            _isScanningImage.value = true
+            val decoded = ImageDecoder.decodeFromByteArray(bytes)
+            _isScanningImage.value = false
+            if (decoded != null) {
+                Toast.makeText(getApplication(), "QR Code Detected!", Toast.LENGTH_SHORT).show()
+                onCodeScanned(decoded.first, decoded.second)
+            } else {
+                Toast.makeText(getApplication(), "No QR Code Detected", Toast.LENGTH_LONG).show()
+                showMessage("No QR Code Detected")
+            }
+        }
+    }
+
     fun scanImageUri(uri: Uri) {
         viewModelScope.launch {
             _isScanningImage.value = true
-            showMessage("Scanning image for QR / Barcode...")
             val decoded = ImageDecoder.decodeFromUri(getApplication(), uri)
             _isScanningImage.value = false
             if (decoded != null) {
+                Toast.makeText(getApplication(), "QR Code Detected!", Toast.LENGTH_SHORT).show()
                 onCodeScanned(decoded.first, decoded.second)
-                showMessage("Code decoded successfully!")
             } else {
-                showMessage("No readable QR code or barcode found in this image.")
+                Toast.makeText(getApplication(), "No QR Code Detected", Toast.LENGTH_LONG).show()
+                showMessage("No QR Code Detected")
             }
         }
     }

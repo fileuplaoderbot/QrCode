@@ -1,7 +1,8 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
@@ -23,47 +24,51 @@ import kotlin.math.hypot
 fun PatternLockView(
     onPatternComplete: (String) -> Unit,
     modifier: Modifier = Modifier,
+    clearTrigger: Any? = null,
     isError: Boolean = false,
     lineColor: Color = Color(0xFF38BDF8),
     errorColor: Color = Color(0xFFEF4444),
     dotColor: Color = Color(0xFF94A3B8)
 ) {
-    val selectedNodes = remember { mutableStateListOf<Int>() }
-    var currentTouchPos by remember { mutableStateOf<Offset?>(null) }
+    val selectedNodes = remember(clearTrigger) { mutableStateListOf<Int>() }
+    var currentTouchPos by remember(clearTrigger) { mutableStateOf<Offset?>(null) }
 
     Box(
         modifier = modifier
             .size(280.dp)
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        selectedNodes.clear()
-                        currentTouchPos = offset
-                        val node = findHitNode(offset, size.width.toFloat(), size.height.toFloat())
-                        if (node != null && !selectedNodes.contains(node)) {
-                            selectedNodes.add(node)
-                        }
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        currentTouchPos = change.position
-                        val node = findHitNode(change.position, size.width.toFloat(), size.height.toFloat())
-                        if (node != null && !selectedNodes.contains(node)) {
-                            selectedNodes.add(node)
-                        }
-                    },
-                    onDragEnd = {
-                        currentTouchPos = null
-                        if (selectedNodes.isNotEmpty()) {
-                            val patternString = selectedNodes.joinToString(",")
-                            onPatternComplete(patternString)
-                        }
-                    },
-                    onDragCancel = {
-                        currentTouchPos = null
-                        selectedNodes.clear()
+            .pointerInput(clearTrigger) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val startNode = findHitNode(down.position, size.width.toFloat(), size.height.toFloat())
+                    if (startNode != null && !selectedNodes.contains(startNode)) {
+                        selectedNodes.add(startNode)
+                        onPatternComplete(selectedNodes.joinToString(","))
                     }
-                )
+                    currentTouchPos = down.position
+
+                    var isDragging = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: break
+                        if (change.pressed) {
+                            change.consume()
+                            isDragging = true
+                            currentTouchPos = change.position
+                            val node = findHitNode(change.position, size.width.toFloat(), size.height.toFloat())
+                            if (node != null && !selectedNodes.contains(node)) {
+                                selectedNodes.add(node)
+                                onPatternComplete(selectedNodes.joinToString(","))
+                            }
+                        } else {
+                            break
+                        }
+                    }
+
+                    currentTouchPos = null
+                    if (selectedNodes.isNotEmpty()) {
+                        onPatternComplete(selectedNodes.joinToString(","))
+                    }
+                }
             }
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {

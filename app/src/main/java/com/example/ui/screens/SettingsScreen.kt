@@ -541,6 +541,8 @@ fun SettingsScreen(
         var patternStep by remember { mutableIntStateOf(0) } // 0 = first draw, 1 = confirm draw
         var firstPattern by remember { mutableStateOf<String?>(null) }
         var secondPattern by remember { mutableStateOf<String?>(null) }
+        var currentDrawnPattern by remember { mutableStateOf("") }
+        var patternClearCounter by remember { mutableIntStateOf(0) }
         var patternError by remember { mutableStateOf<String?>(null) }
 
         AlertDialog(
@@ -706,60 +708,111 @@ fun SettingsScreen(
                         2 -> {
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                val prompt = if (patternStep == 0) {
-                                    "Draw pattern (connect at least 4 dots)"
+                                val stepTitle = if (patternStep == 0) "Step 1 of 2: Draw or Tap Pattern" else "Step 2 of 2: Confirm Pattern"
+                                val stepSubtitle = if (patternStep == 0) {
+                                    "Connect at least 4 dots by dragging or tapping dots"
                                 } else {
-                                    "Draw pattern again to confirm"
+                                    "Redraw the exact same pattern to confirm"
                                 }
 
-                                Text(prompt, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                                Text(stepTitle, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.primary)
+                                Text(stepSubtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                                 PatternLockView(
                                     onPatternComplete = { pattern ->
-                                        val count = pattern.split(",").size
-                                        if (patternStep == 0) {
-                                            if (count < 4) {
-                                                patternError = "Connect at least 4 dots"
-                                            } else {
-                                                firstPattern = pattern
-                                                patternStep = 1
-                                                patternError = null
-                                            }
-                                        } else {
-                                            secondPattern = pattern
-                                            if (secondPattern != firstPattern) {
-                                                patternError = "Patterns do not match. Redraw to confirm."
-                                            } else {
-                                                patternError = null
-                                            }
-                                        }
+                                        currentDrawnPattern = pattern
+                                        patternError = null
                                     },
-                                    modifier = Modifier.size(220.dp)
+                                    clearTrigger = patternClearCounter to patternStep,
+                                    modifier = Modifier.size(230.dp)
                                 )
 
-                                if (patternStep == 1 && firstPattern != null) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.Center
-                                    ) {
-                                        TextButton(onClick = {
-                                            patternStep = 0
-                                            firstPattern = null
-                                            secondPattern = null
+                                val dotCount = if (currentDrawnPattern.isNotBlank()) currentDrawnPattern.split(",").size else 0
+                                Text(
+                                    text = if (dotCount > 0) "$dotCount dots connected" else "Touch or drag to connect dots",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (dotCount >= 4) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                                )
+
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            currentDrawnPattern = ""
+                                            patternClearCounter++
                                             patternError = null
-                                        }) {
-                                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text("Reset Pattern")
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Clear")
+                                    }
+
+                                    if (patternStep == 0) {
+                                        Button(
+                                            onClick = {
+                                                if (dotCount < 4) {
+                                                    patternError = "Please connect at least 4 dots"
+                                                } else {
+                                                    firstPattern = currentDrawnPattern
+                                                    currentDrawnPattern = ""
+                                                    patternStep = 1
+                                                    patternClearCounter++ // Clears previous drawn pattern completely!
+                                                    patternError = null
+                                                }
+                                            },
+                                            enabled = dotCount >= 4
+                                        ) {
+                                            Text("Next: Confirm")
+                                        }
+                                    } else {
+                                        Button(
+                                            onClick = {
+                                                if (currentDrawnPattern != firstPattern) {
+                                                    patternError = "Pattern does not match. Please redraw to confirm."
+                                                    currentDrawnPattern = ""
+                                                    patternClearCounter++
+                                                } else {
+                                                    secondPattern = currentDrawnPattern
+                                                    patternError = null
+                                                    viewModel.setLock(
+                                                        type = LockType.PATTERN,
+                                                        secret = firstPattern!!,
+                                                        length = firstPattern!!.split(",").size,
+                                                        enableBiometrics = enableBio
+                                                    )
+                                                    showSecuritySetupDialog = false
+                                                }
+                                            },
+                                            enabled = dotCount >= 4
+                                        ) {
+                                            Text("Confirm Pattern")
                                         }
                                     }
                                 }
 
+                                if (patternStep == 1) {
+                                    TextButton(
+                                        onClick = {
+                                            patternStep = 0
+                                            firstPattern = null
+                                            secondPattern = null
+                                            currentDrawnPattern = ""
+                                            patternClearCounter++
+                                            patternError = null
+                                        }
+                                    ) {
+                                        Text("Start Over from Step 1")
+                                    }
+                                }
+
                                 patternError?.let {
-                                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
                                 }
                             }
                         }
@@ -822,9 +875,10 @@ fun SettingsScreen(
                                 }
                             }
                             2 -> {
-                                if (firstPattern == null || secondPattern == null) {
-                                    patternError = "Please draw and confirm your pattern"
-                                } else if (firstPattern != secondPattern) {
+                                val matchPattern = secondPattern ?: if (patternStep == 1 && currentDrawnPattern == firstPattern) currentDrawnPattern else null
+                                if (firstPattern == null || matchPattern == null) {
+                                    patternError = "Please complete Step 1 and confirm your pattern in Step 2"
+                                } else if (firstPattern != matchPattern) {
                                     patternError = "Patterns do not match"
                                 } else {
                                     viewModel.setLock(

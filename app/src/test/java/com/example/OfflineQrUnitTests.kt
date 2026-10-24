@@ -140,4 +140,56 @@ class OfflineQrUnitTests {
         assertTrue(SecurityManager.verifySecret("0,1,2,4,6,7,8", salt, hash))
         assertFalse(SecurityManager.verifySecret("0,1,2,3,4", salt, hash))
     }
+
+    @Test
+    fun testUserScreenshotDecode() {
+        val file1 = java.io.File("public/assets/aistudio/Screenshot_20261024-123757_b8834e1b.png")
+        val file2 = java.io.File("../public/assets/aistudio/Screenshot_20261024-123757_b8834e1b.png")
+        val file = if (file1.exists()) file1 else file2
+        if (!file.exists()) return
+        val img = javax.imageio.ImageIO.read(file) ?: return
+        val w = img.width
+        val h = img.height
+        val rgb = img.getRGB(0, 0, w, h, null, 0, w)
+        val source = com.google.zxing.RGBLuminanceSource(w, h, rgb)
+
+        // Try standard decode
+        val reader = com.google.zxing.MultiFormatReader()
+        var decoded: com.google.zxing.Result? = null
+
+        // Try HybridBinarizer
+        try {
+            decoded = reader.decode(com.google.zxing.BinaryBitmap(com.google.zxing.common.HybridBinarizer(source)))
+        } catch (e: Exception) {
+            println("HybridBinarizer failed: ${e.message}")
+        }
+
+        // Try GlobalHistogramBinarizer
+        if (decoded == null) {
+            try {
+                decoded = reader.decode(com.google.zxing.BinaryBitmap(com.google.zxing.common.GlobalHistogramBinarizer(source)))
+            } catch (e: Exception) {
+                println("GlobalHistogramBinarizer failed: ${e.message}")
+            }
+        }
+
+        println("Direct full decode result: ${decoded?.text}")
+        assertTrue("Direct decode should succeed", decoded != null)
+
+        // Now test half resolution (sampleSize = 2)
+        val scaled = java.awt.image.BufferedImage(w / 2, h / 2, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val g = scaled.createGraphics()
+        g.drawImage(img, 0, 0, w / 2, h / 2, null)
+        g.dispose()
+
+        val scaledRgb = scaled.getRGB(0, 0, w / 2, h / 2, null, 0, w / 2)
+        val scaledSource = com.google.zxing.RGBLuminanceSource(w / 2, h / 2, scaledRgb)
+        var scaledDecoded: com.google.zxing.Result? = null
+        try {
+            scaledDecoded = reader.decode(com.google.zxing.BinaryBitmap(com.google.zxing.common.HybridBinarizer(scaledSource)))
+        } catch (e: Exception) {
+            println("Scaled HybridBinarizer failed: ${e.message}")
+        }
+        println("Scaled decode result: ${scaledDecoded?.text}")
+    }
 }

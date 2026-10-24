@@ -83,7 +83,16 @@ fun HomeScreen(
         viewModel.setAwaitingActivityResult(false)
         val uri = result.data?.data ?: (if (result.data?.clipData != null && result.data!!.clipData!!.itemCount > 0) result.data!!.clipData!!.getItemAt(0).uri else null)
         if (uri != null) {
-            viewModel.scanImageUri(uri)
+            val bytes = try {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            } catch (e: Exception) {
+                null
+            }
+            if (bytes != null && bytes.isNotEmpty()) {
+                viewModel.scanImageBytes(bytes)
+            } else {
+                viewModel.scanImageUri(uri)
+            }
         }
     }
 
