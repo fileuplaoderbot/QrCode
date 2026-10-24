@@ -108,4 +108,36 @@ class OfflineQrUnitTests {
         assertFalse(SecurityManager.verifyPin("9999", salt1, hash1))
         assertFalse(SecurityManager.verifyPin("1234", salt2, hash1))
     }
+
+    @Test
+    fun testSixDigitPinAndEightDigitPin() {
+        val pin6 = "839201"
+        val salt = SecurityManager.generateSalt()
+        val hash = SecurityManager.hashPin(pin6, salt)
+        assertTrue(SecurityManager.verifyPin("839201", salt, hash))
+        assertFalse(SecurityManager.verifyPin("839202", salt, hash))
+
+        val pin8 = "12345678"
+        val hash8 = SecurityManager.hashPin(pin8, salt)
+        assertTrue(SecurityManager.verifyPin("12345678", salt, hash8))
+        assertFalse(SecurityManager.verifyPin("1234567", salt, hash8))
+    }
+
+    @Test
+    fun testAlphabetPasswordLock() {
+        val password = "MySecurePassword#2026!"
+        val salt = SecurityManager.generateSalt()
+        val hash = SecurityManager.hashSecret(password, salt)
+        assertTrue(SecurityManager.verifySecret("MySecurePassword#2026!", salt, hash))
+        assertFalse(SecurityManager.verifySecret("WrongPassword", salt, hash))
+    }
+
+    @Test
+    fun testPatternLock() {
+        val pattern = "0,1,2,4,6,7,8"
+        val salt = SecurityManager.generateSalt()
+        val hash = SecurityManager.hashSecret(pattern, salt)
+        assertTrue(SecurityManager.verifySecret("0,1,2,4,6,7,8", salt, hash))
+        assertFalse(SecurityManager.verifySecret("0,1,2,3,4", salt, hash))
+    }
 }

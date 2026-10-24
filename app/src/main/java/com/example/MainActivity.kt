@@ -72,7 +72,7 @@ class MainActivity : FragmentActivity() {
             }
 
             MyApplicationTheme(themePreference = themeMode) {
-                if (lockState.isLocked) {
+                if (lockState.isLocked && lockState.lockType != com.example.data.preferences.LockType.NONE) {
                     LockScreen(viewModel = viewModel)
                 } else {
                     MainAppScaffold(
@@ -97,9 +97,11 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    override fun onPause() {
-        super.onPause()
-        viewModel.lockApp()
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            viewModel.lockApp()
+        }
     }
 
     override fun startActivityForResult(intent: android.content.Intent, requestCode: Int) {

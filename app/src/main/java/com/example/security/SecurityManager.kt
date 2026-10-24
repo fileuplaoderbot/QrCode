@@ -29,47 +29,61 @@ object SecurityManager {
         return computed.equals(storedHashHex, ignoreCase = true)
     }
 
+    fun hashSecret(secret: String, saltHex: String): String = hashPin(secret, saltHex)
+
+    fun verifySecret(enteredSecret: String, storedSaltHex: String, storedHashHex: String): Boolean =
+        verifyPin(enteredSecret, storedSaltHex, storedHashHex)
+
     fun canAuthenticateBiometrics(context: Context): Boolean {
-        val biometricManager = BiometricManager.from(context)
-        val canAuth = biometricManager.canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.BIOMETRIC_WEAK
-        )
-        return canAuth == BiometricManager.BIOMETRIC_SUCCESS
+        return try {
+            val biometricManager = BiometricManager.from(context)
+            val canAuth = biometricManager.canAuthenticate(
+                BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.BIOMETRIC_WEAK
+            )
+            canAuth == BiometricManager.BIOMETRIC_SUCCESS
+        } catch (t: Throwable) {
+            false
+        }
     }
 
     fun showBiometricPrompt(
         activity: FragmentActivity,
         title: String = "Unlock OfflineQR",
-        subtitle: String = "Use your biometric credential to unlock",
+        subtitle: String = "Authenticate using fingerprint or face",
+        negativeButtonText: String = "Use Passcode",
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
-        val executor = ContextCompat.getMainExecutor(activity)
-        val callback = object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                super.onAuthenticationSucceeded(result)
-                onSuccess()
+        try {
+            val executor = ContextCompat.getMainExecutor(activity)
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    super.onAuthenticationSucceeded(result)
+                    onSuccess()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    super.onAuthenticationError(errorCode, errString)
+                    onError(errString.toString())
+                }
+
+                override fun onAuthenticationFailed() {
+                    super.onAuthenticationFailed()
+                    // Authentication failed (e.g. wrong finger), prompt remains open
+                }
             }
 
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                super.onAuthenticationError(errorCode, errString)
-                onError(errString.toString())
-            }
+            val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                .setTitle(title)
+                .setSubtitle(subtitle)
+                .setNegativeButtonText(negativeButtonText)
+                .build()
 
-            override fun onAuthenticationFailed() {
-                super.onAuthenticationFailed()
-                // Authentication failed (e.g. wrong finger), prompt remains open
-            }
+            val biometricPrompt = BiometricPrompt(activity, executor, callback)
+            biometricPrompt.authenticate(promptInfo)
+        } catch (t: Throwable) {
+            onError(t.localizedMessage ?: "Biometric prompt unavailable")
         }
-
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(title)
-            .setSubtitle(subtitle)
-            .setNegativeButtonText("Use PIN")
-            .build()
-
-        val biometricPrompt = BiometricPrompt(activity, executor, callback)
-        biometricPrompt.authenticate(promptInfo)
     }
 
     private fun bytesToHex(bytes: ByteArray): String {

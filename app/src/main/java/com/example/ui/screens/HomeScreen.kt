@@ -73,13 +73,15 @@ fun HomeScreen(
     val allScans by viewModel.allScans.collectAsStateWithLifecycle()
     val favorites by viewModel.favoriteScans.collectAsStateWithLifecycle()
     val pinLockEnabled by viewModel.pinLockEnabled.collectAsStateWithLifecycle()
+    val lockType by viewModel.lockType.collectAsStateWithLifecycle()
 
     val context = androidx.compose.ui.platform.LocalContext.current
 
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val uri = result.data?.data
+        viewModel.setAwaitingActivityResult(false)
+        val uri = result.data?.data ?: (if (result.data?.clipData != null && result.data!!.clipData!!.itemCount > 0) result.data!!.clipData!!.getItemAt(0).uri else null)
         if (uri != null) {
             viewModel.scanImageUri(uri)
         }
@@ -261,6 +263,7 @@ fun HomeScreen(
                     modifier = Modifier
                         .weight(1f)
                         .clickable {
+                            viewModel.setAwaitingActivityResult(true)
                             com.example.utils.GalleryPickerHelper.launchImagePicker(context, galleryLauncher)
                         }
                         .testTag("action_gallery_card")
@@ -325,7 +328,12 @@ fun HomeScreen(
                 StatChip(
                     icon = Icons.Default.Lock,
                     label = "App Lock",
-                    value = if (pinLockEnabled) "Active" else "Off",
+                    value = when (lockType) {
+                        com.example.data.preferences.LockType.PIN -> "PIN"
+                        com.example.data.preferences.LockType.PASSWORD -> "Password"
+                        com.example.data.preferences.LockType.PATTERN -> "Pattern"
+                        else -> "Off"
+                    },
                     modifier = Modifier.weight(1f)
                 ) {
                     viewModel.navigateTo(Screen.SETTINGS)

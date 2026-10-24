@@ -145,13 +145,15 @@ fun ScannerScreen(
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val uri = result.data?.data
+        viewModel.setAwaitingActivityResult(false)
+        val uri = result.data?.data ?: (if (result.data?.clipData != null && result.data!!.clipData!!.itemCount > 0) result.data!!.clipData!!.getItemAt(0).uri else null)
         if (uri != null) {
             viewModel.scanImageUri(uri)
         }
     }
 
     val onPickGallerySafe: () -> Unit = {
+        viewModel.setAwaitingActivityResult(true)
         GalleryPickerHelper.launchImagePicker(context, galleryLauncher)
     }
 

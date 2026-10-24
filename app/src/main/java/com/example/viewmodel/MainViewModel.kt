@@ -8,6 +8,7 @@ import com.example.backup.BackupManager
 import com.example.data.local.AppDatabase
 import com.example.data.local.ScanEntity
 import com.example.data.preferences.AppPreferences
+import com.example.data.preferences.LockType
 import com.example.data.repository.ScanRepository
 import com.example.decoder.ImageDecoder
 import com.example.model.ParsedPayload
@@ -17,7 +18,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -33,7 +33,8 @@ enum class Screen {
 
 data class LockState(
     val isLocked: Boolean = false,
-    val hasPinConfigured: Boolean = false,
+    val lockType: LockType = LockType.NONE,
+    val pinLength: Int = 4,
     val biometricsAllowed: Boolean = false,
     val errorMessage: String? = null
 )
@@ -66,11 +67,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val saveSensitiveHistory: StateFlow<Boolean> = prefs.saveSensitiveHistory
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
-    val pinLockEnabled: StateFlow<Boolean> = prefs.pinLockEnabled
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    val lockType: StateFlow<LockType> = prefs.lockType
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LockType.NONE)
+
+    val pinLength: StateFlow<Int> = prefs.pinLength
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
 
     val biometricEnabled: StateFlow<Boolean> = prefs.biometricEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val isLockActive: StateFlow<Boolean> = prefs.isLockActive
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val pinLockEnabled: StateFlow<Boolean> = isLockActive
+
+    // Activity result / picker tracking to prevent unexpected locking during external interactions
+    private val _isAwaitingActivityResult = MutableStateFlow(false)
+    val isAwaitingActivityResult: StateFlow<Boolean> = _isAwaitingActivityResult.asStateFlow()
+
+    fun setAwaitingActivityResult(awaiting: Boolean) {
+        _isAwaitingActivityResult.value = awaiting
+    }
+
+    private val _isScanningImage = MutableStateFlow(false)
+    val isScanningImage: StateFlow<Boolean> = _isScanningImage.asStateFlow()
 
     // Navigation
     private val _currentScreen = MutableStateFlow(Screen.HOME)
@@ -98,15 +118,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
+    // Cached salt & hash for fast synchronous validation
+    @Volatile
+    private var currentSalt: String? = null
+    @Volatile
+    private var currentHash: String? = null
+
     init {
+        // Cache credentials
+        viewModelScope.launch {
+            prefs.lockSalt.collect { currentSalt = it }
+        }
+        viewModelScope.launch {
+            prefs.lockHash.collect { currentHash = it }
+        }
+
         // Initialize lock state
         viewModelScope.launch {
-            val enabled = prefs.pinLockEnabled.first()
+            val type = prefs.lockType.first()
+            val length = prefs.pinLength.first()
             val bio = prefs.biometricEnabled.first()
-            if (enabled) {
+            if (type != LockType.NONE) {
                 _lockState.value = LockState(
                     isLocked = true,
-                    hasPinConfigured = true,
+                    lockType = type,
+                    pinLength = length,
                     biometricsAllowed = bio
                 )
             }
@@ -144,7 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Called when a QR or barcode is scanned via camera stream
+     * Called when a QR or barcode is scanned via camera stream or gallery
      */
     fun onCodeScanned(text: String, format: String) {
         viewModelScope.launch {
@@ -184,13 +220,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Decode image picked from Gallery
+     * Decode image picked from Gallery with comprehensive multi-pass decoding
      */
     fun scanImageUri(uri: Uri) {
         viewModelScope.launch {
+            _isScanningImage.value = true
+            showMessage("Scanning image for QR / Barcode...")
             val decoded = ImageDecoder.decodeFromUri(getApplication(), uri)
+            _isScanningImage.value = false
             if (decoded != null) {
                 onCodeScanned(decoded.first, decoded.second)
+                showMessage("Code decoded successfully!")
             } else {
                 showMessage("No readable QR code or barcode found in this image.")
             }
@@ -243,51 +283,104 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setPin(pin: String, enableBiometrics: Boolean = false) {
+    // Configures any of the 3 lock types (PIN, PASSWORD, PATTERN)
+    fun setLock(type: LockType, secret: String, length: Int = secret.length, enableBiometrics: Boolean = false) {
         viewModelScope.launch {
             val salt = SecurityManager.generateSalt()
-            val hash = SecurityManager.hashPin(pin, salt)
-            prefs.setPinSecurity(enabled = true, salt = salt, hash = hash)
-            prefs.setBiometricEnabled(enableBiometrics)
-            _lockState.value = _lockState.value.copy(
-                hasPinConfigured = true,
-                biometricsAllowed = enableBiometrics,
-                isLocked = false
+            val hash = SecurityManager.hashPin(secret, salt)
+            currentSalt = salt
+            currentHash = hash
+            prefs.setSecurityLock(
+                type = type,
+                salt = salt,
+                hash = hash,
+                length = length,
+                enableBiometrics = enableBiometrics
             )
-            showMessage("PIN security lock enabled")
+            _lockState.value = _lockState.value.copy(
+                isLocked = false,
+                lockType = type,
+                pinLength = length,
+                biometricsAllowed = enableBiometrics,
+                errorMessage = null
+            )
+            val typeTitle = when (type) {
+                LockType.PIN -> "$length-Digit Number PIN"
+                LockType.PASSWORD -> "Alphanumeric Password"
+                LockType.PATTERN -> "Pattern Lock"
+                LockType.NONE -> "Security"
+            }
+            showMessage("$typeTitle enabled successfully")
         }
+    }
+
+    fun setPin(pin: String, enableBiometrics: Boolean = false) {
+        setLock(LockType.PIN, pin, pin.length, enableBiometrics)
+    }
+
+    fun verifySecretSync(enteredSecret: String): Boolean {
+        val s = currentSalt ?: return false
+        val h = currentHash ?: return false
+        return SecurityManager.verifyPin(enteredSecret, s, h)
     }
 
     fun disablePin(enteredPin: String): Boolean {
-        var success = false
-        viewModelScope.launch {
-            val salt = prefs.pinSalt.first()
-            val hash = prefs.pinHash.first()
-            if (salt != null && hash != null && SecurityManager.verifyPin(enteredPin, salt, hash)) {
-                prefs.setPinSecurity(enabled = false)
-                _lockState.value = LockState(isLocked = false, hasPinConfigured = false)
-                showMessage("PIN security lock disabled")
-                success = true
-            } else {
-                _lockState.value = _lockState.value.copy(errorMessage = "Incorrect PIN")
+        if (verifySecretSync(enteredPin)) {
+            viewModelScope.launch {
+                prefs.disableLock()
+                currentSalt = null
+                currentHash = null
+                _lockState.value = LockState(isLocked = false, lockType = LockType.NONE)
+                showMessage("Security lock removed")
             }
+            return true
         }
-        return success
+        return false
     }
 
-    fun unlockWithPin(enteredPin: String): Boolean {
-        var correct = false
-        viewModelScope.launch {
-            val salt = prefs.pinSalt.first()
-            val hash = prefs.pinHash.first()
-            if (salt != null && hash != null && SecurityManager.verifyPin(enteredPin, salt, hash)) {
-                _lockState.value = _lockState.value.copy(isLocked = false, errorMessage = null)
-                correct = true
-            } else {
-                _lockState.value = _lockState.value.copy(errorMessage = "Incorrect PIN. Try again.")
+    fun disableSecurity(enteredSecret: String, onResult: (Boolean) -> Unit) {
+        if (verifySecretSync(enteredSecret)) {
+            viewModelScope.launch {
+                prefs.disableLock()
+                currentSalt = null
+                currentHash = null
+                _lockState.value = LockState(isLocked = false, lockType = LockType.NONE)
+                showMessage("Security lock removed")
+                onResult(true)
+            }
+        } else {
+            // Also try fallback to DataStore read in case cache wasn't populated yet
+            viewModelScope.launch {
+                val salt = prefs.lockSalt.first()
+                val hash = prefs.lockHash.first()
+                if (salt != null && hash != null && SecurityManager.verifyPin(enteredSecret, salt, hash)) {
+                    prefs.disableLock()
+                    currentSalt = null
+                    currentHash = null
+                    _lockState.value = LockState(isLocked = false, lockType = LockType.NONE)
+                    showMessage("Security lock removed")
+                    onResult(true)
+                } else {
+                    onResult(false)
+                }
             }
         }
-        return correct
+    }
+
+    fun unlockWithSecret(enteredSecret: String): Boolean {
+        if (verifySecretSync(enteredSecret)) {
+            _lockState.value = _lockState.value.copy(isLocked = false, errorMessage = null)
+            return true
+        } else {
+            val err = when (_lockState.value.lockType) {
+                LockType.PIN -> "Incorrect PIN. Try again."
+                LockType.PASSWORD -> "Incorrect Password. Try again."
+                LockType.PATTERN -> "Incorrect Pattern. Try again."
+                else -> "Invalid credential."
+            }
+            _lockState.value = _lockState.value.copy(errorMessage = err)
+            return false
+        }
     }
 
     fun unlockWithBiometrics() {
@@ -295,7 +388,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun lockApp() {
-        if (pinLockEnabled.value) {
+        if (!_isAwaitingActivityResult.value && lockType.value != LockType.NONE) {
+            _lockState.value = _lockState.value.copy(isLocked = true, errorMessage = null)
+        }
+    }
+
+    fun lockAppNow() {
+        if (lockType.value != LockType.NONE) {
             _lockState.value = _lockState.value.copy(isLocked = true, errorMessage = null)
         }
     }
