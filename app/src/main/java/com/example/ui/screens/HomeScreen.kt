@@ -77,24 +77,24 @@ fun HomeScreen(
 
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
+    val onUriPicked: (android.net.Uri?) -> Unit = { uri ->
         viewModel.setAwaitingActivityResult(false)
-        val uri = result.data?.data ?: (if (result.data?.clipData != null && result.data!!.clipData!!.itemCount > 0) result.data!!.clipData!!.getItemAt(0).uri else null)
         if (uri != null) {
-            val bytes = try {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            } catch (e: Exception) {
-                null
-            }
-            if (bytes != null && bytes.isNotEmpty()) {
-                viewModel.scanImageBytes(bytes)
-            } else {
-                viewModel.scanImageUri(uri)
-            }
+            viewModel.scanImageFromUri(context, uri)
+        } else {
+            android.widget.Toast.makeText(context, "No photo selected", android.widget.Toast.LENGTH_SHORT).show()
         }
     }
+
+    val pickMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = onUriPicked
+    )
+
+    val getContentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = onUriPicked
+    )
 
     LazyColumn(
         modifier = modifier
@@ -273,7 +273,7 @@ fun HomeScreen(
                         .weight(1f)
                         .clickable {
                             viewModel.setAwaitingActivityResult(true)
-                            com.example.utils.GalleryPickerHelper.launchImagePicker(context, galleryLauncher)
+                            com.example.utils.GalleryPickerHelper.launchImagePicker(context, pickMediaLauncher, getContentLauncher)
                         }
                         .testTag("action_gallery_card")
                 ) {

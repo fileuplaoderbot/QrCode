@@ -253,6 +253,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun scanImageFromUri(context: android.content.Context, uri: Uri) {
+        viewModelScope.launch {
+            _isScanningImage.value = true
+            Toast.makeText(context, "Scanning image for QR code...", Toast.LENGTH_SHORT).show()
+            val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                    null
+                }
+            }
+
+            val decoded = if (bytes != null && bytes.isNotEmpty()) {
+                ImageDecoder.decodeFromByteArray(bytes)
+            } else {
+                ImageDecoder.decodeFromUri(context, uri)
+            }
+
+            _isScanningImage.value = false
+
+            if (decoded != null) {
+                Toast.makeText(context, "QR Code Detected!", Toast.LENGTH_SHORT).show()
+                onCodeScanned(decoded.first, decoded.second)
+            } else {
+                Toast.makeText(context, "No QR Code Detected", Toast.LENGTH_LONG).show()
+                showMessage("No QR Code Detected")
+            }
+        }
+    }
+
     fun toggleFavorite(scan: ScanEntity) {
         viewModelScope.launch {
             repository.toggleFavorite(scan)

@@ -9,6 +9,8 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.History
@@ -61,6 +63,7 @@ class MainActivity : FragmentActivity() {
             val activeScanEntityId by viewModel.activeScanEntityId.collectAsStateWithLifecycle()
             val currentScreen by viewModel.currentScreen.collectAsStateWithLifecycle()
             val snackbarMessage by viewModel.snackbarMessage.collectAsStateWithLifecycle()
+            val isScanningImage by viewModel.isScanningImage.collectAsStateWithLifecycle()
 
             val snackbarHostState = remember { SnackbarHostState() }
 
@@ -92,6 +95,34 @@ class MainActivity : FragmentActivity() {
                             }
                         )
                     }
+
+                    // Analyzing image overlay dialog
+                    if (isScanningImage) {
+                        androidx.compose.ui.window.Dialog(onDismissRequest = { /* keep open while decoding */ }) {
+                            androidx.compose.material3.Surface(
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                tonalElevation = 6.dp
+                            ) {
+                                androidx.compose.foundation.layout.Row(
+                                    modifier = Modifier.padding(24.dp),
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)
+                                ) {
+                                    androidx.compose.material3.CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                    Text(
+                                        text = "Scanning image for QR code...",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -101,24 +132,6 @@ class MainActivity : FragmentActivity() {
         super.onStop()
         if (!isChangingConfigurations) {
             viewModel.lockApp()
-        }
-    }
-
-    override fun startActivityForResult(intent: android.content.Intent, requestCode: Int) {
-        val safeCode = if (requestCode != -1) (requestCode and 0xFFFF) else -1
-        try {
-            super.startActivityForResult(intent, safeCode)
-        } catch (e: Exception) {
-            super.startActivityForResult(intent, -1)
-        }
-    }
-
-    override fun startActivityForResult(intent: android.content.Intent, requestCode: Int, options: android.os.Bundle?) {
-        val safeCode = if (requestCode != -1) (requestCode and 0xFFFF) else -1
-        try {
-            super.startActivityForResult(intent, safeCode, options)
-        } catch (e: Exception) {
-            super.startActivityForResult(intent, -1, options)
         }
     }
 }

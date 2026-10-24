@@ -141,29 +141,28 @@ fun ScannerScreen(
         }
     }
 
-    // Standard ActivityResult launcher using GalleryPickerHelper (ACTION_PICK + ACTION_GET_CONTENT)
-    val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
+    val onUriPicked: (Uri?) -> Unit = { uri ->
         viewModel.setAwaitingActivityResult(false)
-        val uri = result.data?.data ?: (if (result.data?.clipData != null && result.data!!.clipData!!.itemCount > 0) result.data!!.clipData!!.getItemAt(0).uri else null)
         if (uri != null) {
-            val bytes = try {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            } catch (e: Exception) {
-                null
-            }
-            if (bytes != null && bytes.isNotEmpty()) {
-                viewModel.scanImageBytes(bytes)
-            } else {
-                viewModel.scanImageUri(uri)
-            }
+            viewModel.scanImageFromUri(context, uri)
+        } else {
+            Toast.makeText(context, "No photo selected", Toast.LENGTH_SHORT).show()
         }
     }
 
+    val pickMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = onUriPicked
+    )
+
+    val getContentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = onUriPicked
+    )
+
     val onPickGallerySafe: () -> Unit = {
         viewModel.setAwaitingActivityResult(true)
-        GalleryPickerHelper.launchImagePicker(context, galleryLauncher)
+        GalleryPickerHelper.launchImagePicker(context, pickMediaLauncher, getContentLauncher)
     }
 
     val onOpenSettings: () -> Unit = {
